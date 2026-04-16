@@ -1,0 +1,8 @@
+2026-04-16T09:46:07Z INFO     bot.main — === Cycle start 2026-04-16T02:46:07.554823+00:00 ===
+2026-04-16T09:46:07Z INFO     bot.state — state.json not found — initialising fresh state
+2026-04-16T09:46:07Z INFO     bot.main — IDLE — running analysis
+2026-04-16T09:46:07Z INFO     bot.main — Signal passes filters — placing order (dry_run=True)
+2026-04-16T09:46:07Z INFO     bot.order_manager — Position sizing: balance=$10000.00 risk=1.0% sl_pct=1.500% → 39 contracts (notional=$33333.33)
+2026-04-16T09:46:07Z INFO     bot.order_manager — DRY RUN: would place limit buy order @ 84000.00 size=39 contracts, TP1=85680.00 SL=82740.00
+2026-04-16T09:46:07Z INFO     bot.order_manager — Position sizing: balance=$10000.00 risk=1.0% sl_pct=1.500% → 39 contracts (notional=$33333.33)
+2026-04-16T09:46:07Z INFO     bot.main — === Cycle end ===

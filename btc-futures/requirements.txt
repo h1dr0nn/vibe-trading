@@ -1,0 +1,7 @@
+# Bot-specific dependencies (agent deps installed separately via agent/requirements.txt)
+# Run from Vibe-Trading/ root:
+#   pip install -r agent/requirements.txt
+#   pip install -r btc-futures/requirements.txt
+
+apscheduler>=3.10
+python-telegram-bot>=20.0

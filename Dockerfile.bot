@@ -1,0 +1,28 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# ── Install agent dependencies ────────────────────────────────────
+COPY agent/requirements.txt agent-requirements.txt
+RUN pip install --no-cache-dir -r agent-requirements.txt
+
+# ── Install bot-specific dependencies ────────────────────────────
+COPY btc-futures/requirements.txt bot-requirements.txt
+RUN pip install --no-cache-dir -r bot-requirements.txt
+
+# ── Copy full repo (agent/ + btc-futures/) ───────────────────────
+# Build context is the repo root (Vibe-Trading/)
+COPY agent/ agent/
+COPY btc-futures/ btc-futures/
+
+# ── Install agent package so cli.py is importable ────────────────
+RUN pip install --no-cache-dir -e agent/ || true
+
+# ── Working directory is btc-futures/ ────────────────────────────
+WORKDIR /app/btc-futures
+
+COPY btc-futures/entrypoint.sh entrypoint.sh
+RUN chmod +x entrypoint.sh
+
+# Secrets injected via env_file — never baked into image
+ENTRYPOINT ["./entrypoint.sh"]

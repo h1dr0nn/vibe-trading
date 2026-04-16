@@ -489,6 +489,89 @@ OpenSpace will auto-discover all 69 skills, enabling auto-fix, auto-improve, and
 
 ---
 
+## 🤖 BTC Futures Auto-Bot
+
+A fully automated trading bot for BTC-USDT perpetual swap on OKX, powered by the Vibe-Trading agent for signal generation.
+
+**How it works:** runs every 2 hours, analyzes multi-timeframe confluence (15m / 1H / 4H / 1D), calls the Gemini agent for deep analysis, then places limit orders with algo TP/SL — all unattended.
+
+**Safety features:** circuit breaker (max daily loss %), danger detection (5 conditions), startup reconciliation, dry run mode, Telegram command interface.
+
+### Setup
+
+```bash
+# 1. Fill in your credentials in .env (root of repo)
+cp .env.example .env   # if not already done
+# Required: OKX_API_KEY, OKX_SECRET_KEY, OKX_API_PASSPHRASE
+# Required: GEMINI_API_KEY (or other LLM provider)
+# Required: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+```
+
+### Run with Docker (recommended)
+
+```bash
+# From repo root — Vibe-Trading/
+docker compose -f docker-compose.bot.yml up -d --build
+
+# Watch logs live
+docker compose -f docker-compose.bot.yml logs -f btc-bot
+
+# Stop
+docker compose -f docker-compose.bot.yml stop btc-bot
+
+# Restart after editing .env
+docker compose -f docker-compose.bot.yml restart btc-bot
+```
+
+### Run locally
+
+```bash
+cd btc-futures
+
+# Install dependencies
+pip install -r ../agent/requirements.txt
+pip install -r requirements.txt
+
+# Test mode — no real orders, Telegram still works
+python bot/main.py --dry-run --once
+
+# Run one cycle with real analysis
+python bot/main.py --once
+
+# Run continuously (2h scheduler)
+python bot/main.py
+```
+
+### Key .env variables for the bot
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DRY_RUN` | `true` | **Always start with true** — no real orders |
+| `OKX_DEMO_MODE` | `false` | Use OKX paper trading endpoint |
+| `BOT_SYMBOL` | `BTC-USDT-SWAP` | Trading pair |
+| `BOT_INTERVAL_HOURS` | `2` | Cycle interval |
+| `RISK_PCT` | `1.0` | % of balance risked per trade |
+| `LEVERAGE` | `5` | Futures leverage |
+| `MIN_CONFIDENCE` | `60` | Min signal confidence to open trade |
+| `MAX_DAILY_LOSS_PCT` | `3.0` | Circuit breaker threshold |
+| `TELEGRAM_BOT_TOKEN` | — | Bot token for alerts + commands |
+
+### Telegram commands
+
+| Command | Description |
+|---------|-------------|
+| `/status` | Balance, position, PnL |
+| `/close` | Close position (2-step confirm) |
+| `/pause` / `/resume` | Pause / resume bot |
+| `/analyze` | Run analysis immediately |
+| `/pnl` | Today's realized PnL |
+| `/dryrun on\|off` | Toggle dry run |
+| `/config` | Show current config |
+
+> **Recommended:** run `DRY_RUN=true` for at least 24h before enabling live trading. See [`btc-futures/BOT.md`](btc-futures/BOT.md) for full design documentation.
+
+---
+
 ## 📁 Project Structure
 
 <details>
@@ -503,46 +586,37 @@ Vibe-Trading/
 │   │
 │   ├── src/
 │   │   ├── agent/                  # ReAct agent core
-│   │   │   ├── loop.py             #   main reasoning loop
-│   │   │   ├── skills.py           #   skill loader (69 SKILL.md files, 7 categories)
-│   │   │   ├── tools.py            #   tool orchestration
-│   │   │   ├── context.py          #   system prompt builder
-│   │   │   ├── memory.py           #   run memory / artifact store
-│   │   │   └── trace.py            #   execution trace writer
-│   │   │
 │   │   ├── tools/                  # 21 agent tools
-│   │   │   ├── backtest_tool.py    #   run backtests
-│   │   │   ├── factor_analysis_tool.py
-│   │   │   ├── options_pricing_tool.py
-│   │   │   ├── pattern_tool.py     #   chart pattern detection
-│   │   │   ├── doc_reader_tool.py  #   PDF reader (OCR fallback)
-│   │   │   ├── web_reader_tool.py  #   web page reader (Jina)
-│   │   │   ├── web_search_tool.py  #   DuckDuckGo web search
-│   │   │   ├── swarm_tool.py       #   launch swarm teams
-│   │   │   └── ...                 #   file I/O, bash, tasks, etc.
-│   │   │
-│   │   ├── skills/                 # 69 finance skills in 7 categories (SKILL.md each)
+│   │   ├── skills/                 # 69 finance skills in 7 categories
 │   │   ├── swarm/                  # Swarm DAG execution engine
 │   │   ├── session/                # Multi-turn chat session management
 │   │   └── providers/              # LLM provider abstraction
 │   │
-│   ├── backtest/                   # Backtest engines
-│   │   ├── engines/                #   7 engines + composite cross-market engine + options_portfolio
-│   │   ├── loaders/                #   5 sources: tushare, okx, yfinance, akshare, ccxt
-│   │   │   ├── base.py             #   DataLoader Protocol
-│   │   │   └── registry.py         #   Registry + auto-fallback chains
-│   │   └── optimizers/             #   MVO, equal vol, max div, risk parity
-│   │
+│   ├── backtest/                   # Backtest engines (7 markets + composite)
 │   └── config/swarm/               # 29 swarm preset YAML definitions
 │
-├── frontend/                       # Web UI (React 19 + Vite + TypeScript)
-│   └── src/
-│       ├── pages/                  #   Home, Agent, RunDetail, Compare
-│       ├── components/             #   chat, charts, layout
-│       └── stores/                 #   Zustand state management
+├── btc-futures/                    # BTC Futures Auto-Bot
+│   ├── bot/
+│   │   ├── main.py                 #   Entrypoint + main loop
+│   │   ├── scheduler.py            #   APScheduler 2h cron
+│   │   ├── okx_private.py          #   OKX authenticated API
+│   │   ├── okx_errors.py           #   Error classification + retry
+│   │   ├── state.py                #   Atomic state.json load/save
+│   │   ├── circuit_breaker.py      #   Daily loss limit
+│   │   ├── reconciler.py           #   Startup OKX <-> state sync
+│   │   ├── order_manager.py        #   Place / close orders
+│   │   ├── pending_order.py        #   Pending order lifecycle
+│   │   ├── position_guard.py       #   Danger detection (5 conditions)
+│   │   ├── telegram_bot.py         #   Commands + notifications
+│   │   └── report.py               #   Message formatting
+│   ├── commands/                   #   Multi-TF analysis + agent bridge (reused)
+│   ├── requirements.txt            #   Bot-specific deps
+│   └── BOT.md                      #   Full design document
 │
-├── Dockerfile                      # Multi-stage build
-├── docker-compose.yml              # One-command deploy
+├── frontend/                       # Web UI (React 19 + Vite + TypeScript)
+│
+├── Dockerfile.bot                  # Bot container (build from repo root)
+├── docker-compose.bot.yml          # Bot one-command deploy
 ├── pyproject.toml                  # Package config + CLI entrypoint
 └── LICENSE                         # MIT
 ```
@@ -620,7 +694,9 @@ Thanks to everyone who has contributed to Vibe-Trading!
 
 ## Disclaimer
 
-Vibe-Trading is for research, simulation, and backtesting only. It is not investment advice and it does not execute live trades. Past performance does not guarantee future results.
+Vibe-Trading's research and backtesting tools are for educational purposes only and do not constitute investment advice.
+
+The **BTC Futures Auto-Bot** (`btc-futures/`) can execute real trades on OKX when `DRY_RUN=false`. Trading futures involves significant risk of loss, including loss of your entire capital. Always start with `DRY_RUN=true` and paper trading (`OKX_DEMO_MODE=true`) before enabling live trading. Past performance does not guarantee future results. Use at your own risk.
 
 ## License
 

@@ -1,0 +1,21 @@
+version: "3.9"
+
+services:
+  btc-bot:
+    build:
+      context: .          # build context = Vibe-Trading/ root
+      dockerfile: Dockerfile.bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./btc-futures/state.json:/app/btc-futures/state.json
+      - ./btc-futures/state.json.bak:/app/btc-futures/state.json.bak
+      - ./btc-futures/bot.log:/app/btc-futures/bot.log
+    environment:
+      - TZ=UTC
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
