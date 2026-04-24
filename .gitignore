@@ -34,6 +34,12 @@ data/minutes/
 data/overnight*.log
 data/*.log
 data/test_write.txt
+
+# Runtime logs & state (per-machine, not for version control)
+*.log
+btc-futures/state.json
+btc-futures/state.json.bak
+btc-futures/logs/
 agent/.pytest_tmp/
 agent/vibe_trading.egg-info/
 agent/vibe_trading_ai.egg-info/
