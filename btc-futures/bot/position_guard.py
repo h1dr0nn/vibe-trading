@@ -95,11 +95,16 @@ def evaluate_danger(
     reasons: list[str] = []
 
     # ── Condition 1: Price close to SL ────────────────────────────────────────
+    # OFF by default — OKX algo SL is the source of truth for exit. Closing
+    # pre-emptively here shrinks the effective SL by the multiplier amount
+    # (e.g. 0.5×ATR1H ≈ 40% of a 0.5% SL) and causes whipsaw losses.
+    # Re-enable via DANGER_CLOSE_ON_SL_PROXIMITY=true if desired.
     sl_price = pos.get("sl_price")
-    if sl_price:
+    danger_close_on_sl = os.getenv("DANGER_CLOSE_ON_SL_PROXIMITY", "false").lower() == "true"
+    if sl_price and danger_close_on_sl:
         atr_1h = _fetch_atr_1h(symbol)
         if atr_1h and atr_1h > 0:
-            danger_mult = float(os.getenv("DANGER_SL_ATR_MULT", "0.5"))
+            danger_mult = float(os.getenv("DANGER_SL_ATR_MULT", "0.15"))
             sl_distance = abs(current_price - sl_price)
             threshold = danger_mult * atr_1h
             if sl_distance < threshold:

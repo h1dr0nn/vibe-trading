@@ -59,6 +59,21 @@ def manage(
     if order_state == "filled":
         logger.info("Pending order %s filled → activating position", ord_id)
         _activate_position(state, order)
+        # Verify the position still exists on OKX — if TP/SL fired in the
+        # gap between cycles, the pending_fill + algo_fill both happened
+        # and there is nothing left. Mark the flag so main.py reports a
+        # combined "filled then closed" message instead of a phantom fill.
+        try:
+            live = with_retry(okx.get_position, inst_id)
+        except Exception as exc:
+            logger.warning("verify live position after fill failed: %s", exc)
+            live = None
+        if live is None:
+            logger.info(
+                "Position not on OKX after fill — TP/SL hit in the gap. "
+                "Flagging for close-reconciliation."
+            )
+            state["position"]["_needs_fresh_close_reconcile"] = True
         return state
 
     # ── Cancelled externally ──────────────────────────────────────────────────
@@ -166,19 +181,27 @@ def _activate_position(
 
     # Preserve TP/SL from the pending order's algo (already set in open_trade)
     existing_pos = state.get("position", {})
+    sl_final = existing_pos.get("sl_price") or state["pending_order"].get("sl_price")
     state["position"] = {
         "active": True,
         "side": "long" if side_str == "buy" else "short",
         "entry_price": fill_px,
         "size_contracts": fill_sz,
         "open_time": datetime.now(tz=timezone.utc).isoformat(),
-        "sl_price": existing_pos.get("sl_price") or state["pending_order"].get("sl_price"),
+        "sl_price": sl_final,
         "tp1_price": existing_pos.get("tp1_price") or state["pending_order"].get("tp1_price"),
-        "tp2_price": existing_pos.get("tp2_price"),
+        "tp2_price": existing_pos.get("tp2_price") or state["pending_order"].get("tp2_price"),
         "algo_order_id": state["pending_order"].get("algo_id"),
         "entry_order_id": order.get("ordId"),
         "reconciled": False,
         "dry_run": False,
+        "original_sl_price": (
+            existing_pos.get("original_sl_price")
+            or state["pending_order"].get("original_sl_price")
+            or sl_final
+        ),
+        "trail_stage": 0,
+        "trail_reason": None,
     }
     state["pending_order"] = {
         "active": False,

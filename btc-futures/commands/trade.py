@@ -10,6 +10,7 @@ Flow:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -123,17 +124,36 @@ def _calc_levels(direction: int, price: float, atr_4h: float, atr_1h: float, atr
     atr = atr_4h * 0.7 + atr_1h * 0.3
     # Entry zone uses 15m ATR for tighter limit order range
     zone_atr = atr_15m if atr_15m > 0 else atr_1h * 0.3
+
+    # SL distance: ATR × mult, hard-capped by SL_PCT_MAX so small balances
+    # can't take oversized SL→loss. TP1/TP2 keep same R:R by scaling off
+    # the (possibly clamped) SL distance.
+    sl_mult = float(os.getenv("SL_ATR_MULT", str(SL_ATR_MULT)))
+    tp1_mult = float(os.getenv("TP1_ATR_MULT", str(TP1_ATR_MULT)))
+    tp2_mult = float(os.getenv("TP2_ATR_MULT", str(TP2_ATR_MULT)))
+    sl_pct_cap = float(os.getenv("SL_PCT_MAX", "0.5")) / 100
+
+    raw_sl_dist = atr * sl_mult
+    max_sl_dist = price * sl_pct_cap
+    sl_dist = min(raw_sl_dist, max_sl_dist) if max_sl_dist > 0 else raw_sl_dist
+
+    # R:R ratios preserved: TPn = (tpn_mult / sl_mult) × sl_dist
+    rr1 = tp1_mult / sl_mult if sl_mult else tp1_mult
+    rr2 = tp2_mult / sl_mult if sl_mult else tp2_mult
+    tp1_dist = sl_dist * rr1
+    tp2_dist = sl_dist * rr2
+
     if direction == 1:
         entry = price
-        sl    = entry - atr * SL_ATR_MULT
-        tp1   = entry + atr * TP1_ATR_MULT
-        tp2   = entry + atr * TP2_ATR_MULT
+        sl    = entry - sl_dist
+        tp1   = entry + tp1_dist
+        tp2   = entry + tp2_dist
         entry_zone = f"${round(price - zone_atr):,.0f} – ${round(price):,.0f}"
     else:
         entry = price
-        sl    = entry + atr * SL_ATR_MULT
-        tp1   = entry - atr * TP1_ATR_MULT
-        tp2   = entry - atr * TP2_ATR_MULT
+        sl    = entry + sl_dist
+        tp1   = entry - tp1_dist
+        tp2   = entry - tp2_dist
         entry_zone = f"${round(price):,.0f} – ${round(price + zone_atr):,.0f}"
 
     risk = abs(entry - sl)

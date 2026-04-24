@@ -36,28 +36,71 @@ def calc_contracts(
     sl_price: float,
     leverage: int,
 ) -> int:
-    """Calculate number of contracts to trade.
+    """Calculate number of contracts to trade using risk-based sizing.
 
-    contracts = (balance × risk_pct/100 / sl_pct × leverage) / entry / contract_size
-    Returns 0 if sizing produces < 1 contract.
+    Target size (BTC) = (balance × risk_pct%) / SL_distance_per_BTC.
+    Contracts = target_BTC / CONTRACT_SIZE (0.01 BTC per contract).
+
+    Leverage does NOT multiply size — it only controls margin required.
+    A leverage check ensures margin ≤ 90% of balance.
+
+    If target < 1 contract, round up to 1 *only* if 1-contract risk
+    stays within MAX_RISK_PCT of balance. Otherwise return 0 (skip trade).
     """
-    sl_pct = abs(entry_price - sl_price) / entry_price
-    if sl_pct == 0:
-        logger.warning("calc_contracts: SL == entry, returning 0")
+    sl_dist = abs(entry_price - sl_price)
+    if sl_dist == 0 or balance <= 0 or entry_price <= 0:
+        logger.warning("calc_contracts: invalid inputs — returning 0")
         return 0
 
-    usdt_at_risk = balance * risk_pct / 100
-    position_usdt = usdt_at_risk / sl_pct
-    notional = position_usdt * leverage
-    contracts = notional / entry_price / CONTRACT_SIZE
+    max_risk_pct = float(os.getenv("MAX_RISK_PCT", "5.0"))
+    target_risk_usdt = balance * risk_pct / 100
+    hard_max_risk_usdt = balance * max_risk_pct / 100
 
-    result = max(int(contracts), 0)
+    # Target contracts by risk%
+    contracts_target = target_risk_usdt / (CONTRACT_SIZE * sl_dist)
+    contracts = int(contracts_target)
+
+    # Round sub-1 up to 1 iff within MAX_RISK_PCT
+    if contracts < 1 and contracts_target > 0:
+        one_contract_risk = CONTRACT_SIZE * sl_dist
+        if one_contract_risk <= hard_max_risk_usdt:
+            contracts = 1
+            logger.info(
+                "Sizing: target %.3f contracts < 1 — rounding up to 1 "
+                "(risk=$%.2f = %.2f%% of balance, within %.1f%% cap)",
+                contracts_target, one_contract_risk,
+                one_contract_risk / balance * 100, max_risk_pct,
+            )
+        else:
+            logger.warning(
+                "Sizing: 1-contract risk $%.2f > MAX_RISK_PCT %.1f%% "
+                "($%.2f) — skipping trade",
+                one_contract_risk, max_risk_pct, hard_max_risk_usdt,
+            )
+            return 0
+
+    # Margin sanity: notional / leverage ≤ 90% balance
+    notional = contracts * CONTRACT_SIZE * entry_price
+    margin_needed = notional / leverage if leverage > 0 else notional
+    max_margin = balance * 0.9
+    if margin_needed > max_margin and leverage > 0:
+        scaled = int(max_margin * leverage / entry_price / CONTRACT_SIZE)
+        logger.warning(
+            "Sizing: margin $%.2f > 90%% balance — scaling %d -> %d contracts",
+            margin_needed, contracts, scaled,
+        )
+        contracts = max(scaled, 0)
+
+    actual_risk = contracts * CONTRACT_SIZE * sl_dist
     logger.info(
-        "Position sizing: balance=$%.2f risk=%.1f%% sl_pct=%.3f%% -> "
-        "%d contracts (notional=$%.2f)",
-        balance, risk_pct, sl_pct * 100, result, notional,
+        "Sizing: balance=$%.2f risk=%.2f%% sl=%.2f%% → %d contracts "
+        "(risk=$%.2f = %.2f%% · notional=$%.2f · margin=$%.2f)",
+        balance, risk_pct, sl_dist / entry_price * 100, contracts,
+        actual_risk, actual_risk / balance * 100 if balance else 0,
+        contracts * CONTRACT_SIZE * entry_price,
+        contracts * CONTRACT_SIZE * entry_price / leverage if leverage else 0,
     )
-    return result
+    return contracts
 
 
 # ── Open new trade ────────────────────────────────────────────────────────────
@@ -107,6 +150,10 @@ def open_trade(
             "entry_price": entry_price,
             "placed_at": datetime.now(tz=timezone.utc).isoformat(),
             "side": side,
+            "sl_price": sl_price,
+            "tp1_price": tp1_price,
+            "tp2_price": tp2_price,
+            "original_sl_price": sl_price,
         }
         state["last_action"] = "dry_run_placed_order"
         state["last_signal"] = {
@@ -130,14 +177,18 @@ def open_trade(
             "entry_price": entry_price,
             "placed_at": datetime.now(tz=timezone.utc).isoformat(),
             "side": side,
+            "sl_price": sl_price,
+            "tp1_price": tp1_price,
+            "tp2_price": tp2_price,
+            "original_sl_price": sl_price,
         }
         # Caller should save state here before step 2
         # (main loop calls save_state after open_trade returns)
 
-        # Step 2: attach algo TP/SL
+        # Step 2: attach algo TP/SL (standalone OCO on the instrument)
         algo_id = with_retry(
             okx.set_algo_tp_sl,
-            inst_id, ord_id, tp1_str, sl_str,
+            inst_id, side, size_str, tp1_str, sl_str,
         )
         state["pending_order"]["algo_id"] = algo_id
 
@@ -204,6 +255,33 @@ def close_trade(
     except OKXError as exc:
         logger.error("close_position failed: %s", exc)
         raise
+
+    # Record realised PnL before clearing state
+    if current_price is not None and pos.get("active"):
+        entry = pos.get("entry_price") or 0
+        size = pos.get("size_contracts") or 0
+        direction = 1 if pos.get("side") == "long" else -1
+        realized = size * CONTRACT_SIZE * (current_price - entry) * direction
+        from bot import circuit_breaker as _cb
+        _cb.record_pnl(state, realized)
+        logger.info("Recorded realized PnL: $%.4f (reason=%s)", realized, reason)
+
+        # Remember last winning close so pullback gate blocks fomo
+        # re-entry (applies to any profitable close, not just TP1).
+        if realized > 0:
+            state["last_tp_close"] = {
+                "side": pos.get("side"),
+                "close_price": current_price,
+                "time": datetime.now(tz=timezone.utc).isoformat(),
+            }
+        # Mirror: remember last losing close so loss-cooldown gate blocks
+        # revenge re-entry in the same direction.
+        elif realized < 0:
+            state["last_loss_close"] = {
+                "side": pos.get("side"),
+                "close_price": current_price,
+                "time": datetime.now(tz=timezone.utc).isoformat(),
+            }
 
     _clear_position(state, reason, current_price)
     state["last_action"] = "closed_position"
@@ -274,6 +352,9 @@ def _clear_position(
         "entry_order_id": None,
         "reconciled": False,
         "dry_run": _dry_run(),
+        "original_sl_price": None,
+        "trail_stage": 0,
+        "trail_reason": None,
     }
     state["pending_order"] = {
         "active": False,

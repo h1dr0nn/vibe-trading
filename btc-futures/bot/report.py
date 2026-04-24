@@ -1,10 +1,70 @@
-"""Format all Telegram notification messages per BOT.md Section 13."""
+"""Telegram message formatting. Uses HTML + emojis for readability.
+
+All send_message_sync() calls use parse_mode="HTML", so <b>, <i>, <code>, <pre>
+tags are rendered. Keep messages compact — mobile screens are narrow.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
 
+
+# ── Emoji constants ───────────────────────────────────────────────────────────
+
+E_LONG = "🟢"
+E_SHORT = "🔴"
+E_FLAT = "⚪"
+E_WIN = "✅"
+E_LOSS = "❌"
+E_WARN = "⚠️"
+E_DANGER = "🚨"
+E_CHART = "📊"
+E_MONEY = "💰"
+E_CLOCK = "⏱"
+E_ROCKET = "🚀"
+E_SHIELD = "🛡"
+E_PAUSE = "⏸"
+E_PLAY = "▶️"
+E_TARGET = "🎯"
+E_STOP = "🛑"
+E_DICE = "🎲"
+E_BELL = "🔔"
+E_GEAR = "⚙️"
+E_INFO = "ℹ️"
+
+
+def _side_emoji(side: str) -> str:
+    return E_LONG if side.lower() in ("long", "buy") else E_SHORT if side.lower() in ("short", "sell") else E_FLAT
+
+
+def _dir_emoji(direction: int) -> str:
+    return E_LONG if direction == 1 else E_SHORT if direction == -1 else E_FLAT
+
+
+def _dir_label(direction: int) -> str:
+    return "LONG" if direction == 1 else "SHORT" if direction == -1 else "FLAT"
+
+
+def _pnl_emoji(pnl: float) -> str:
+    return E_WIN if pnl > 0 else E_LOSS if pnl < 0 else "➖"
+
+
+def _fmt_usdt(amount: float) -> str:
+    sign = "+" if amount > 0 else ("" if amount == 0 else "")
+    return f"{sign}${amount:,.2f}"
+
+
+def _fmt_pct(value: float) -> str:
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.2f}%"
+
+
+def _fmt_price(price: float) -> str:
+    return f"${price:,.0f}"
+
+
+# ── Messages ──────────────────────────────────────────────────────────────────
 
 def cycle_report(
     state: dict[str, Any],
@@ -16,31 +76,30 @@ def cycle_report(
     now_str = datetime.now(tz=timezone.utc).strftime("%H:%M UTC")
     symbol = "BTC-USDT-SWAP"
 
-    lines = [f"BTC-USDT-SWAP | {now_str}", ""]
-    lines.append(f"Balance: ${balance:.2f} USDT")
+    lines = [f"{E_CHART} <b>{symbol}</b> · <i>{now_str}</i>"]
+    lines.append(f"{E_MONEY} Balance: <b>${balance:,.2f}</b>")
 
     if pos.get("active"):
-        side = pos.get("side", "?").upper()
+        side = pos.get("side", "?")
+        side_label = side.upper()
         entry = pos.get("entry_price", 0) or 0
         size = pos.get("size_contracts", 0) or 0
 
         from bot.order_manager import CONTRACT_SIZE
-        direction = 1 if pos.get("side") == "long" else -1
+        direction = 1 if side == "long" else -1
         pnl = size * CONTRACT_SIZE * (current_price - entry) * direction
         pnl_pct = pnl / balance * 100 if balance else 0
-        pnl_sign = "+" if pnl >= 0 else ""
 
-        emoji = "+" if pnl >= 0 else "-"
-        lines.append(
-            f"Position: {side} ${entry:,.0f} -> now ${current_price:,.0f} "
-            f"({pnl_sign}${pnl:.2f} / {pnl_sign}{pnl_pct:.1f}%)"
-        )
+        lines.append("")
+        lines.append(f"{_side_emoji(side)} <b>{side_label}</b> · {size} contracts")
+        lines.append(f"   Entry: <code>{_fmt_price(entry)}</code>  Now: <code>{_fmt_price(current_price)}</code>")
+        lines.append(f"   PnL: <b>{_fmt_usdt(pnl)}</b> ({_fmt_pct(pnl_pct)}) {_pnl_emoji(pnl)}")
+
         tp1 = pos.get("tp1_price")
         sl = pos.get("sl_price")
         if tp1 and sl:
-            lines.append(f"TP1: ${tp1:,.0f} | SL: ${sl:,.0f}")
+            lines.append(f"   {E_TARGET} TP1: <code>{_fmt_price(tp1)}</code>  {E_STOP} SL: <code>{_fmt_price(sl)}</code>")
 
-        # Hours open
         open_time_str = pos.get("open_time")
         if open_time_str:
             try:
@@ -48,31 +107,60 @@ def cycle_report(
                 if ot.tzinfo is None:
                     ot = ot.replace(tzinfo=timezone.utc)
                 hours = (datetime.now(tz=timezone.utc) - ot).total_seconds() / 3600
-                lines.append(f"Open: {hours:.1f}h")
+                lines.append(f"   {E_CLOCK} Open: {hours:.1f}h")
             except ValueError:
                 pass
 
     sig = state.get("last_signal")
     if sig:
-        direction_label = "LONG" if sig.get("direction") == 1 else ("SHORT" if sig.get("direction") == -1 else "FLAT")
+        direction = sig.get("direction", 0)
         conf = sig.get("confidence", "?")
-        lines.append(f"Signal: {direction_label} {conf}% confidence")
+        score = sig.get("net_score", 0)
+        lines.append("")
+        lines.append(f"{E_DICE} Signal: {_dir_emoji(direction)} <b>{_dir_label(direction)}</b> · conf <b>{conf}%</b> · score <code>{score:+.2f}</code>")
 
     if funding_rate is not None:
-        lines.append(f"Funding: {funding_rate*100:+.4f}%/8h")
+        lines.append(f"{E_INFO} Funding: <code>{funding_rate*100:+.4f}%</code> /8h")
 
     if pos.get("active"):
-        lines.append("")
-        lines.append("Status: Holding position")
+        lines.append(f"\n{E_SHIELD} <i>Holding position</i>")
     elif state.get("pending_order", {}).get("active"):
-        lines.append("")
-        lines.append("Status: Waiting for limit order fill")
+        lines.append(f"\n{E_CLOCK} <i>Waiting for limit order fill</i>")
 
-    dry = " [DRY RUN]" if state.get("position", {}).get("dry_run") else ""
-    if dry:
-        lines.append(dry.strip())
+    if state.get("position", {}).get("dry_run"):
+        lines.append(f"\n{E_WARN} <i>DRY RUN mode</i>")
 
     return "\n".join(lines)
+
+
+def _tf_breakdown_lines(signal: dict[str, Any]) -> list[str]:
+    """Render per-TF direction/score as a compact block."""
+    tfb = signal.get("tf_breakdown") or {}
+    if not tfb:
+        return []
+    # Match main.py TIMEFRAMES ordering
+    order = ["15m", "1H", "4H", "1D"]
+    direction = signal.get("direction", 0)
+    agreeing = signal.get("agreeing_tfs", 0)
+
+    lines = [f"{E_CHART} <b>TF breakdown</b>"]
+    for tf in order:
+        d = tfb.get(tf)
+        if not d:
+            continue
+        tf_sig = d.get("signal", 0)
+        tf_score = d.get("score", 0)
+        rsi = d.get("rsi", 0)
+        adx = d.get("adx", 0)
+        ema = d.get("ema_cross", "")
+        mark = E_WIN if (tf_sig == direction and direction != 0) else E_LOSS if tf_sig == -direction else "➖"
+        lines.append(
+            f"   {mark} {tf:<4} {_dir_emoji(tf_sig)} score <code>{tf_score:+.2f}</code> · "
+            f"RSI {rsi:.0f} · ADX {adx:.0f} · EMA <i>{ema}</i>"
+        )
+    # 15m excluded from agreement count — note which TFs count
+    lines.append(f"   <i>Agreement: {agreeing}/3 big TFs (1H·4H·1D)</i>")
+    return lines
 
 
 def order_placed(
@@ -82,7 +170,9 @@ def order_placed(
     ord_id: str,
     dry_run: bool = False,
 ) -> str:
-    direction = "LONG" if signal.get("direction") == 1 else "SHORT"
+    direction = signal.get("direction", 0)
+    side_emoji = _dir_emoji(direction)
+    side_label = _dir_label(direction)
     entry = signal.get("entry", 0)
     tp1 = signal.get("tp1", 0)
     tp2 = signal.get("tp2", 0)
@@ -90,26 +180,41 @@ def order_placed(
     conf = signal.get("confidence", "?")
     score = signal.get("net_score", 0)
     source = signal.get("source", "local")
-    order_type = "limit"
 
-    prefix = "[DRY RUN] " if dry_run else ""
     tp1_pct = abs(tp1 - entry) / entry * 100 if entry else 0
-    sl_pct = abs(sl - entry) / entry * 100 if entry else 0
     tp2_pct = abs(tp2 - entry) / entry * 100 if entry else 0
+    sl_pct = abs(sl - entry) / entry * 100 if entry else 0
 
-    return (
-        f"{prefix}New order placed\n"
-        f"\n"
-        f"Direction : {direction}\n"
-        f"Entry     : ${entry:,.0f} ({order_type})\n"
-        f"TP1       : ${tp1:,.0f} (+{tp1_pct:.1f}%)\n"
-        f"TP2       : ${tp2:,.0f} (+{tp2_pct:.1f}%)\n"
-        f"SL        : ${sl:,.0f} (-{sl_pct:.1f}%)\n"
-        f"Size      : {contracts} contracts (risk ${risk_usdt:.2f})\n"
-        f"Confidence: {conf}% | Score: {score}\n"
-        f"\n"
-        f"Source: {source}"
-    )
+    header = f"{E_WARN} [DRY RUN] " if dry_run else f"{E_ROCKET} "
+    reasoning = (signal.get("reasoning") or "").strip()
+
+    lines = [
+        f"{header}<b>New order placed</b>",
+        "",
+        f"{side_emoji} <b>{side_label}</b> · limit · {contracts} contracts",
+        f"{E_CHART} Entry: <code>{_fmt_price(entry)}</code>",
+        f"{E_TARGET} TP1: <code>{_fmt_price(tp1)}</code> ({_fmt_pct(tp1_pct)})",
+        f"{E_TARGET} TP2: <code>{_fmt_price(tp2)}</code> ({_fmt_pct(tp2_pct)})",
+        f"{E_STOP} SL : <code>{_fmt_price(sl)}</code> (-{sl_pct:.2f}%)",
+        "",
+        f"{E_DICE} Confidence: <b>{conf}%</b> · Score <code>{score:+.2f}</code>",
+        f"{E_MONEY} Risk: <b>${risk_usdt:.2f}</b>",
+        f"{E_INFO} Source: <i>{source}</i>",
+    ]
+    if reasoning:
+        lines.append(f"💡 <b>Reasoning</b>: <i>{_truncate(reasoning, 380)}</i>")
+    tf_lines = _tf_breakdown_lines(signal)
+    if tf_lines:
+        lines.append("")
+        lines.extend(tf_lines)
+    return "\n".join(lines)
+
+
+def _truncate(text: str, limit: int) -> str:
+    text = text.replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
 
 
 def position_closed(
@@ -125,73 +230,108 @@ def position_closed(
     from bot.order_manager import CONTRACT_SIZE
     direction = 1 if side == "long" else -1
     pnl = size_contracts * CONTRACT_SIZE * (close_price - entry_price) * direction
-    pnl_pct = pnl / (balance - pnl) * 100 if (balance - pnl) != 0 else 0
-    sign = "+" if pnl >= 0 else ""
-    emoji = "Win" if pnl >= 0 else "Loss"
-    prefix = "[DRY RUN] " if dry_run else ""
+    denom = balance - pnl
+    pnl_pct = pnl / denom * 100 if denom else 0
+
+    prefix = f"{E_WARN} [DRY RUN] " if dry_run else ""
+    header_emoji = E_WIN if pnl >= 0 else E_LOSS
     reason_label = _reason_label(reason)
 
     h = int(hold_hours)
     m = int((hold_hours - h) * 60)
 
-    return (
-        f"{prefix}Position closed — {reason_label}\n"
-        f"\n"
-        f"Entry  : ${entry_price:,.0f}\n"
-        f"Close  : ${close_price:,.0f}\n"
-        f"PnL    : {sign}${pnl:.2f} ({sign}{pnl_pct:.2f}%)\n"
-        f"Hold   : {h}h {m}m\n"
-        f"Balance: ${balance:.2f} USDT"
-    )
+    return "\n".join([
+        f"{prefix}{header_emoji} <b>Position closed</b> · <i>{reason_label}</i>",
+        "",
+        f"{_side_emoji(side)} {side.upper()}",
+        f"   Entry: <code>{_fmt_price(entry_price)}</code>",
+        f"   Close: <code>{_fmt_price(close_price)}</code>",
+        f"   PnL  : <b>{_fmt_usdt(pnl)}</b> ({_fmt_pct(pnl_pct)})",
+        "",
+        f"{E_CLOCK} Hold: {h}h {m}m",
+        f"{E_MONEY} Balance: <b>${balance:,.2f}</b>",
+    ])
 
 
 def no_trade(reason: str, signal: dict[str, Any], next_run_str: str) -> str:
-    direction = "LONG" if signal.get("direction") == 1 else ("SHORT" if signal.get("direction") == -1 else "FLAT")
+    direction = signal.get("direction", 0)
     conf = signal.get("confidence", "?")
     score = signal.get("net_score", 0)
 
-    return (
-        f"Analysis complete — No Trade\n"
-        f"\n"
-        f"Reason: {reason}\n"
-        f"Signal: {direction} {conf}% (score {score})\n"
-        f"\n"
-        f"Next cycle: {next_run_str}"
-    )
+    lines = [
+        f"{E_PAUSE} <b>No trade</b>",
+        "",
+        f"Reason: <i>{reason}</i>",
+        f"Signal: {_dir_emoji(direction)} <b>{_dir_label(direction)}</b> · conf <b>{conf}%</b> · score <code>{score:+.2f}</code>",
+    ]
+    reasoning = (signal.get("reasoning") or "").strip()
+    if reasoning:
+        lines.append(f"💡 <i>{_truncate(reasoning, 320)}</i>")
+    tf_lines = _tf_breakdown_lines(signal)
+    if tf_lines:
+        lines.append("")
+        lines.extend(tf_lines)
+    lines.append("")
+    lines.append(f"{E_CLOCK} Next cycle: <i>{next_run_str}</i>")
+    return "\n".join(lines)
 
 
 def circuit_break_alert(daily_loss: float, loss_pct: float, max_pct: float, until_str: str) -> str:
-    return (
-        f"CIRCUIT BREAKER triggered\n"
-        f"\n"
-        f"Daily loss: ${daily_loss:.2f} ({loss_pct:.1f}% of balance)\n"
-        f"Limit     : {max_pct:.1f}%\n"
-        f"\n"
-        f"Bot paused until {until_str} UTC.\n"
-        f"Type /status to check."
-    )
+    return "\n".join([
+        f"{E_DANGER} <b>CIRCUIT BREAKER triggered</b>",
+        "",
+        f"{E_LOSS} Daily loss: <b>${daily_loss:,.2f}</b> ({loss_pct:.1f}% of balance)",
+        f"{E_SHIELD} Limit: {max_pct:.1f}%",
+        "",
+        f"{E_PAUSE} Bot paused until <b>{until_str}</b> UTC",
+        f"{E_INFO} Type /status to check",
+    ])
+
+
+def trail_moved(position: dict[str, Any], old_sl: float, new_sl: float, reason: str, current_price: float) -> str:
+    side = position.get("side", "?")
+    entry = position.get("entry_price", 0) or 0
+    size = position.get("size_contracts", 0) or 0
+    tp1 = position.get("tp1_price", 0) or 0
+    from bot.order_manager import CONTRACT_SIZE
+    direction = 1 if side == "long" else -1
+    pnl = size * CONTRACT_SIZE * (current_price - entry) * direction
+    locked = size * CONTRACT_SIZE * (new_sl - entry) * direction
+
+    return "\n".join([
+        f"{E_SHIELD} <b>SL moved</b> · <i>{reason}</i>",
+        "",
+        f"{_side_emoji(side)} <b>{side.upper()}</b> · {size} contracts",
+        f"   Entry : <code>{_fmt_price(entry)}</code>",
+        f"   Now   : <code>{_fmt_price(current_price)}</code>  PnL: <b>{_fmt_usdt(pnl)}</b> {_pnl_emoji(pnl)}",
+        f"   SL    : <code>{_fmt_price(old_sl)}</code> → <code>{_fmt_price(new_sl)}</code>",
+        f"   {E_TARGET} TP1: <code>{_fmt_price(tp1)}</code>",
+        "",
+        f"{E_INFO} Locked: <b>{_fmt_usdt(locked)}</b> if SL hits",
+    ])
 
 
 def danger_alert(reasons: list[str], position: dict[str, Any], close_price: float) -> str:
-    side = position.get("side", "?").upper()
+    side = position.get("side", "?")
+    side_label = side.upper()
     entry = position.get("entry_price", 0) or 0
     sl = position.get("sl_price", 0) or 0
-    pct = abs(close_price - entry) / entry * 100 if entry else 0
-    sign = "+" if close_price >= entry else "-"
+    pct = (close_price - entry) / entry * 100 if entry else 0
 
-    reason_text = "\n".join(f"  - {r}" for r in reasons)
-    return (
-        f"DANGER — closing position\n"
-        f"\n"
-        f"Reasons:\n{reason_text}\n"
-        f"\n"
-        f"Side   : {side}\n"
-        f"Entry  : ${entry:,.0f}\n"
-        f"Current: ${close_price:,.0f} ({sign}{pct:.1f}%)\n"
-        f"SL     : ${sl:,.0f}\n"
-        f"\n"
-        f"Executing market close..."
-    )
+    reason_text = "\n".join(f"  • <i>{r}</i>" for r in reasons)
+    return "\n".join([
+        f"{E_DANGER} <b>DANGER — closing position</b>",
+        "",
+        f"Reasons:",
+        reason_text,
+        "",
+        f"{_side_emoji(side)} <b>{side_label}</b>",
+        f"   Entry  : <code>{_fmt_price(entry)}</code>",
+        f"   Current: <code>{_fmt_price(close_price)}</code> ({_fmt_pct(pct)})",
+        f"   SL     : <code>{_fmt_price(sl)}</code>",
+        "",
+        f"{E_STOP} Executing market close…",
+    ])
 
 
 def status_report(state: dict[str, Any], balance: float, current_price: float) -> str:
@@ -199,62 +339,66 @@ def status_report(state: dict[str, Any], balance: float, current_price: float) -
     cb = state.get("circuit_break", False)
     paused = state.get("bot_paused", False)
 
-    lines = ["Bot Status\n"]
-    lines.append(f"Balance : ${balance:.2f} USDT")
-
     if cb:
-        lines.append(f"Circuit : TRIGGERED (until {state.get('circuit_break_until', '?')})")
+        status_line = f"{E_DANGER} CIRCUIT BREAK <i>(until {state.get('circuit_break_until', '?')})</i>"
     elif paused:
-        lines.append("Status  : PAUSED")
+        status_line = f"{E_PAUSE} <b>PAUSED</b>"
     else:
-        lines.append("Status  : RUNNING")
+        status_line = f"{E_PLAY} <b>RUNNING</b>"
+
+    lines = [
+        f"{E_GEAR} <b>Bot Status</b>",
+        "",
+        f"Status : {status_line}",
+        f"{E_MONEY} Balance: <b>${balance:,.2f}</b>",
+    ]
 
     if pos.get("active"):
-        side = pos.get("side", "?").upper()
+        side = pos.get("side", "?")
         entry = pos.get("entry_price", 0) or 0
         size = pos.get("size_contracts", 0) or 0
         from bot.order_manager import CONTRACT_SIZE
-        direction = 1 if pos.get("side") == "long" else -1
+        direction = 1 if side == "long" else -1
         pnl = size * CONTRACT_SIZE * (current_price - entry) * direction
-        pnl_sign = "+" if pnl >= 0 else ""
-        lines.append(f"Position: {side} {size} contracts @ ${entry:,.0f}")
-        lines.append(f"PnL     : {pnl_sign}${pnl:.2f}")
-        lines.append(f"Current : ${current_price:,.0f}")
+        pnl_pct = pnl / balance * 100 if balance else 0
+        lines.append("")
+        lines.append(f"{_side_emoji(side)} <b>{side.upper()}</b> · {size} contracts @ <code>{_fmt_price(entry)}</code>")
+        lines.append(f"   Now: <code>{_fmt_price(current_price)}</code>  PnL: <b>{_fmt_usdt(pnl)}</b> ({_fmt_pct(pnl_pct)}) {_pnl_emoji(pnl)}")
     else:
-        lines.append("Position: NONE")
+        lines.append(f"{E_FLAT} Position: <i>none</i>")
+        lines.append(f"   Current: <code>{_fmt_price(current_price)}</code>")
 
     daily_pnl = state.get("daily_realized_pnl", 0)
     daily_trades = state.get("daily_trades", 0)
-    pnl_sign = "+" if daily_pnl >= 0 else ""
-    lines.append(f"Daily   : {pnl_sign}${daily_pnl:.2f} ({daily_trades} trades)")
+    lines.append("")
+    lines.append(f"{E_CHART} Daily: <b>{_fmt_usdt(daily_pnl)}</b> · {daily_trades} trades {_pnl_emoji(daily_pnl)}")
 
     last_action = state.get("last_action")
     if last_action:
-        lines.append(f"Last act: {last_action}")
+        lines.append(f"{E_INFO} Last: <i>{last_action}</i>")
 
     return "\n".join(lines)
 
 
 def close_confirm_prompt(position: dict[str, Any], current_price: float) -> str:
-    side = position.get("side", "?").upper()
+    side = position.get("side", "?")
     size = position.get("size_contracts", 0)
     entry = position.get("entry_price", 0) or 0
     from bot.order_manager import CONTRACT_SIZE
-    direction = 1 if position.get("side") == "long" else -1
+    direction = 1 if side == "long" else -1
     pnl = (size or 0) * CONTRACT_SIZE * (current_price - entry) * direction
-    pnl_sign = "+" if pnl >= 0 else ""
 
-    return (
-        f"Confirm close position?\n"
-        f"\n"
-        f"Side   : {side}\n"
-        f"Size   : {size} contracts\n"
-        f"Entry  : ${entry:,.0f}\n"
-        f"Current: ${current_price:,.0f} ({pnl_sign}${pnl:.2f})\n"
-        f"\n"
-        f"Type /close confirm to execute.\n"
-        f"Expires in 60 seconds."
-    )
+    return "\n".join([
+        f"{E_WARN} <b>Confirm close position?</b>",
+        "",
+        f"{_side_emoji(side)} <b>{side.upper()}</b> · {size} contracts",
+        f"   Entry  : <code>{_fmt_price(entry)}</code>",
+        f"   Current: <code>{_fmt_price(current_price)}</code>",
+        f"   PnL    : <b>{_fmt_usdt(pnl)}</b> {_pnl_emoji(pnl)}",
+        "",
+        f"{E_BELL} Send <code>/close confirm</code> to execute",
+        f"{E_CLOCK} Expires in 60 seconds",
+    ])
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -266,8 +410,11 @@ def _reason_label(reason: str) -> str:
         "danger_funding": "Extreme funding",
         "danger_too_long": "Held too long",
         "danger_floating_loss": "Floating loss limit",
-        "manual_close": "Manual (/close command)",
+        "manual_close": "Manual close",
         "reconcile_external_close": "Externally closed",
+        "tp1_hit": "TP1 hit",
+        "tp2_hit": "TP2 hit",
+        "sl_hit": "SL hit",
     }
     for key, label in mapping.items():
         if key in reason:

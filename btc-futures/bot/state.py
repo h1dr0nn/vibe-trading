@@ -30,6 +30,10 @@ _DEFAULT_STATE: dict[str, Any] = {
         "entry_order_id": None,
         "reconciled": False,
         "dry_run": False,
+        # Trail-SL state (BE + progressive lock)
+        "original_sl_price": None,  # immutable reference for R calc
+        "trail_stage": 0,           # 0=initial, 1=breakeven, 2=locked +R
+        "trail_reason": None,
     },
 
     "pending_order": {
@@ -53,6 +57,15 @@ _DEFAULT_STATE: dict[str, Any] = {
 
     "bot_paused": False,
     "pending_close_confirm": False,
+
+    # Last winning close — used by pullback gate to block fomo re-entry.
+    # Set to {side, close_price, time} after any TP hit; cleared after
+    # PULLBACK_WINDOW_HOURS.
+    "last_tp_close": None,
+
+    # Last losing close — used by loss-cooldown gate to block revenge
+    # re-entries in the same direction for LOSS_COOLDOWN_MINUTES.
+    "last_loss_close": None,
 }
 
 

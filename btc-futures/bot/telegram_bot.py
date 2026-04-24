@@ -98,13 +98,23 @@ def start_bot(state: dict[str, Any], on_cycle_trigger: Any = None) -> None:
 
 
 def _run_bot_loop(token: str, on_cycle_trigger: Any) -> None:
-    """Entry point for the background thread."""
+    """Entry point for the background thread.
+
+    Uses explicit initialize/start/stop lifecycle instead of run_polling() to
+    avoid the "Cannot close a running event loop" issue that python-telegram-bot
+    >=20 hits when run_polling() is invoked inside a non-main thread.
+    """
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(_start_application(token, on_cycle_trigger))
     except Exception as exc:
-        logger.error("Telegram bot loop crashed: %s", exc)
+        logger.error("Telegram bot loop crashed: %s", exc, exc_info=True)
+    finally:
+        try:
+            loop.close()
+        except Exception:
+            pass
 
 
 async def _start_application(token: str, on_cycle_trigger: Any) -> None:
@@ -132,12 +142,12 @@ async def _start_application(token: str, on_cycle_trigger: Any) -> None:
             price = 0.0
             balance = 0.0
         from bot.report import status_report
-        await update.message.reply_text(status_report(state, balance, price))
+        await update.message.reply_text(status_report(state, balance, price), parse_mode="HTML")
 
     async def cmd_analyze(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not _authorized(update):
             return
-        await update.message.reply_text("Running analysis... will report shortly.")
+        await update.message.reply_text("🔄 <b>Running analysis…</b>\n<i>Report will follow shortly.</i>", parse_mode="HTML")
         if on_cycle_trigger:
             threading.Thread(target=on_cycle_trigger, daemon=True).start()
 
@@ -155,21 +165,23 @@ async def _start_application(token: str, on_cycle_trigger: Any) -> None:
         # Two-step: /close confirm
         if args and args[0].lower() == "confirm":
             if _close_confirm_expiry is None or datetime.now(tz=timezone.utc) > _close_confirm_expiry:
-                await update.message.reply_text("Confirmation expired. Send /close first.")
+                await update.message.reply_text("⏱ Confirmation expired. Send /close first.")
                 return
             if not state["position"]["active"]:
-                await update.message.reply_text("No open position to close.")
+                await update.message.reply_text("⚪ No open position to close.")
                 _close_confirm_expiry = None
                 return
 
+            from bot.state import save_state as _save_state
             state["pending_close_confirm"] = True
+            _save_state(state)
             _close_confirm_expiry = None
-            await update.message.reply_text("Close confirmed — executing now...")
+            await update.message.reply_text("✅ <b>Close confirmed</b> — executing now…", parse_mode="HTML")
             return
 
         # First step: prompt for confirmation
         if not state["position"]["active"]:
-            await update.message.reply_text("No open position to close.")
+            await update.message.reply_text("⚪ No open position to close.")
             return
 
         try:
@@ -183,23 +195,28 @@ async def _start_application(token: str, on_cycle_trigger: Any) -> None:
         from bot.report import close_confirm_prompt
         from datetime import timedelta
         _close_confirm_expiry = datetime.now(tz=timezone.utc) + timedelta(seconds=_CLOSE_CONFIRM_TTL)
-        await update.message.reply_text(close_confirm_prompt(state["position"], price))
+        await update.message.reply_text(close_confirm_prompt(state["position"], price), parse_mode="HTML")
 
     async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not _authorized(update):
             return
-        state = _get_state()
-        if state:
-            state["bot_paused"] = True
-            await update.message.reply_text("Bot paused. No new orders will be placed. /resume to continue.")
+        from bot.state import load_state, save_state
+        state = load_state()
+        state["bot_paused"] = True
+        save_state(state)
+        await update.message.reply_text(
+            "⏸ <b>Bot paused</b>\n<i>No new orders. Send /resume to continue.</i>",
+            parse_mode="HTML",
+        )
 
     async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not _authorized(update):
             return
-        state = _get_state()
-        if state:
-            state["bot_paused"] = False
-            await update.message.reply_text("Bot resumed.")
+        from bot.state import load_state, save_state
+        state = load_state()
+        state["bot_paused"] = False
+        save_state(state)
+        await update.message.reply_text("▶️ <b>Bot resumed</b>", parse_mode="HTML")
 
     async def cmd_pnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not _authorized(update):
@@ -210,54 +227,63 @@ async def _start_application(token: str, on_cycle_trigger: Any) -> None:
             return
         realized = state.get("daily_realized_pnl", 0)
         trades = state.get("daily_trades", 0)
-        sign = "+" if realized >= 0 else ""
+        emoji = "✅" if realized > 0 else "❌" if realized < 0 else "➖"
+        sign = "+" if realized > 0 else ""
         await update.message.reply_text(
-            f"Today's PnL\n\nRealized: {sign}${realized:.4f} USDT ({trades} trades)"
+            f"📊 <b>Today's PnL</b>\n\n"
+            f"Realized: <b>{sign}${realized:,.4f}</b> USDT {emoji}\n"
+            f"Trades: <b>{trades}</b>",
+            parse_mode="HTML",
         )
 
     async def cmd_config(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not _authorized(update):
             return
-        keys = [
-            "BOT_SYMBOL", "BOT_INTERVAL_HOURS", "DRY_RUN",
-            "RISK_PCT", "LEVERAGE", "ORDER_TYPE",
-            "MIN_CONFIDENCE", "MIN_NET_SCORE", "MIN_AGREEING_TF",
-            "SL_ATR_MULT", "TP1_ATR_MULT", "TP2_ATR_MULT",
-            "MAX_DAILY_LOSS_PCT", "MAX_OPEN_HOURS",
-            "DANGER_SL_ATR_MULT", "DANGER_LOSS_PCT",
-            "PENDING_CANCEL_HOURS", "PENDING_CANCEL_DRIFT_PCT",
+        groups = [
+            ("⚙️ Bot", ["BOT_SYMBOL", "BOT_INTERVAL_HOURS", "DRY_RUN"]),
+            ("💰 Sizing", ["RISK_PCT", "LEVERAGE", "ORDER_TYPE"]),
+            ("🎲 Signal", ["MIN_CONFIDENCE", "MIN_NET_SCORE", "MIN_AGREEING_TF"]),
+            ("🎯 TP/SL", ["SL_ATR_MULT", "TP1_ATR_MULT", "TP2_ATR_MULT"]),
+            ("🛡 Risk", ["MAX_DAILY_LOSS_PCT", "MAX_OPEN_HOURS", "DANGER_SL_ATR_MULT", "DANGER_LOSS_PCT"]),
+            ("⏱ Pending", ["PENDING_CANCEL_HOURS", "PENDING_CANCEL_DRIFT_PCT"]),
         ]
-        lines = ["Config\n"]
-        for k in keys:
-            v = os.getenv(k, "(not set)")
-            lines.append(f"{k}: {v}")
-        await update.message.reply_text("\n".join(lines))
+        lines = ["<b>⚙️ Config</b>"]
+        for title, keys in groups:
+            lines.append("")
+            lines.append(f"<b>{title}</b>")
+            for k in keys:
+                v = os.getenv(k, "<i>(not set)</i>")
+                lines.append(f"  <code>{k}</code>: <b>{v}</b>")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
     async def cmd_dryrun(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not _authorized(update):
             return
         args = ctx.args or []
         if not args or args[0].lower() not in ("on", "off"):
-            await update.message.reply_text("Usage: /dryrun on|off")
+            await update.message.reply_text("Usage: <code>/dryrun on|off</code>", parse_mode="HTML")
             return
         value = "true" if args[0].lower() == "on" else "false"
         os.environ["DRY_RUN"] = value
-        await update.message.reply_text(f"DRY_RUN set to {value}.")
+        emoji = "⚠️" if value == "true" else "🚀"
+        await update.message.reply_text(
+            f"{emoji} DRY_RUN set to <b>{value}</b>.", parse_mode="HTML"
+        )
 
     async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         text = (
-            "Commands\n\n"
-            "/status  — balance, position, PnL\n"
-            "/analyze — run analysis now\n"
-            "/close   — close position (2-step confirm)\n"
-            "/pause   — pause bot\n"
-            "/resume  — resume bot\n"
-            "/pnl     — today's realized PnL\n"
-            "/config  — show current config\n"
-            "/dryrun on|off — toggle dry run\n"
-            "/help    — this message"
+            "<b>🤖 Bot Commands</b>\n\n"
+            "📊 /status  — balance, position, PnL\n"
+            "🔄 /analyze — run analysis now\n"
+            "🛑 /close   — close position (2-step confirm)\n"
+            "⏸ /pause   — pause bot\n"
+            "▶️ /resume  — resume bot\n"
+            "💰 /pnl     — today's realized PnL\n"
+            "⚙️ /config  — show current config\n"
+            "🎚 /dryrun on|off — toggle dry run\n"
+            "ℹ️ /help    — this message"
         )
-        await update.message.reply_text(text)
+        await update.message.reply_text(text, parse_mode="HTML")
 
     # Register handlers
     app.add_handler(CommandHandler("status", cmd_status))
@@ -271,13 +297,33 @@ async def _start_application(token: str, on_cycle_trigger: Any) -> None:
     app.add_handler(CommandHandler("help", cmd_help))
 
     logger.info("Telegram command handlers registered")
-    await app.run_polling(drop_pending_updates=True)
+    # Manual lifecycle — avoids asyncio conflicts with background-thread loop
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    # Block forever; background thread is daemon, exits when main process exits
+    stop_event = asyncio.Event()
+    try:
+        await stop_event.wait()
+    finally:
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _get_state() -> dict[str, Any] | None:
-    return _state_ref
+    """Always reload state from disk so Telegram commands see fresh cycle updates.
+
+    The `_state_ref` is kept only as a fallback if disk read fails.
+    """
+    try:
+        from bot.state import load_state
+        return load_state()
+    except Exception as exc:
+        logger.warning("load_state failed, using in-memory ref: %s", exc)
+        return _state_ref
 
 
 def _authorized(update: Any) -> bool:

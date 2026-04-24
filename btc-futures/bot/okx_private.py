@@ -26,15 +26,40 @@ from bot.okx_errors import (
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://www.okx.com/api/v5"
+BASE_HOST = "https://www.okx.com"
+API_PREFIX = "/api/v5"
+BASE_URL = BASE_HOST + API_PREFIX
 TIMEOUT = 15
+
+# Clock offset between local machine and OKX server (milliseconds).
+# Lazy-initialised on first _timestamp() call; refreshed if auth fails.
+_server_time_offset_ms: float | None = None
+
+
+def _fetch_server_time_offset() -> float:
+    """Fetch OKX server time and compute offset vs local clock (ms)."""
+    try:
+        resp = requests.get(f"{BASE_URL}/public/time", timeout=5)
+        server_ms = float(resp.json()["data"][0]["ts"])
+        local_ms = datetime.now(tz=timezone.utc).timestamp() * 1000
+        offset = server_ms - local_ms
+        logger.info("OKX clock offset: %+.0f ms", offset)
+        return offset
+    except Exception as exc:
+        logger.warning("Could not sync OKX server time: %s", exc)
+        return 0.0
 
 
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 
 def _timestamp() -> str:
-    """ISO 8601 UTC timestamp required by OKX."""
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    """ISO 8601 UTC timestamp required by OKX, corrected for server clock drift."""
+    global _server_time_offset_ms
+    if _server_time_offset_ms is None:
+        _server_time_offset_ms = _fetch_server_time_offset()
+    now_ms = datetime.now(tz=timezone.utc).timestamp() * 1000 + _server_time_offset_ms
+    corrected = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+    return corrected.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 def _sign(secret: str, timestamp: str, method: str, path: str, body: str = "") -> str:
@@ -66,16 +91,29 @@ def _headers(method: str, path: str, body: str = "") -> dict[str, str]:
 # ── Low-level request ─────────────────────────────────────────────────────────
 
 def _request(method: str, path: str, payload: dict | None = None) -> Any:
-    """Execute an authenticated request and return response data list."""
-    import json as _json
+    """Execute an authenticated request and return response data list.
 
-    body = _json.dumps(payload) if payload else ""
-    url = BASE_URL + path
-    hdrs = _headers(method, path, body)
+    For GET, query params are part of the request path for signing purposes
+    (per OKX V5 spec). For POST, params go in the JSON body.
+    """
+    import json as _json
+    from urllib.parse import urlencode
+
+    if method == "GET":
+        query = "?" + urlencode(payload) if payload else ""
+        sign_path = API_PREFIX + path + query
+        body = ""
+        url = BASE_HOST + sign_path
+    else:
+        body = _json.dumps(payload) if payload else ""
+        sign_path = API_PREFIX + path
+        url = BASE_HOST + sign_path
+
+    hdrs = _headers(method, sign_path, body)
 
     try:
         if method == "GET":
-            resp = requests.get(url, params=payload, headers=hdrs, timeout=TIMEOUT)
+            resp = requests.get(url, headers=hdrs, timeout=TIMEOUT)
         else:
             resp = requests.post(url, data=body, headers=hdrs, timeout=TIMEOUT)
     except requests.Timeout as exc:
@@ -95,7 +133,15 @@ def _request(method: str, path: str, payload: dict | None = None) -> Any:
     code = data.get("code", "0")
     if code != "0":
         msg = data.get("msg", "")
-        # Some batch endpoints return per-item errors — log and raise
+        # Batch endpoints (code="1") return per-item errors in data[].sCode/sMsg —
+        # surface the first one so upstream sees the real reason, not "All operations failed".
+        inner = data.get("data") or []
+        if inner and isinstance(inner[0], dict):
+            s_code = inner[0].get("sCode", "")
+            s_msg = inner[0].get("sMsg", "")
+            if s_code and s_code != "0":
+                msg = f"{msg} — {s_code}: {s_msg}".strip(" —")
+                code = s_code
         logger.debug("OKX response: %s", data)
         raise classify_okx_code(code, msg)
 
@@ -182,21 +228,29 @@ def place_order(
 
 def set_algo_tp_sl(
     inst_id: str,
-    ord_id: str,
+    entry_side: str,
+    size: str,
     tp_price: str,
     sl_price: str,
 ) -> str:
-    """Attach OCO algo TP/SL to an existing order. Returns algoId."""
+    """Place a standalone OCO algo (TP/SL) that fires when either trigger hits.
+
+    `entry_side`: the entry side of the position ("buy" for long, "sell" for short).
+    The algo uses the opposite side to close.
+    """
+    close_side = "sell" if entry_side == "buy" else "buy"
     payload = {
         "instId": inst_id,
         "tdMode": "cross",
+        "side": close_side,
+        "ordType": "oco",
+        "sz": size,
         "algoType": "oco",
+        "reduceOnly": "true",
         "tpTriggerPx": tp_price,
-        "tpOrdPx": "-1",   # market order on trigger
+        "tpOrdPx": "-1",   # market on trigger
         "slTriggerPx": sl_price,
-        "slOrdPx": "-1",   # market order on trigger
-        "attachAlgoOrds": "true",
-        "ordId": ord_id,
+        "slOrdPx": "-1",   # market on trigger
     }
     data = _post("/trade/order-algo", payload)
     if not data:
@@ -204,7 +258,7 @@ def set_algo_tp_sl(
     algo_id = data[0].get("algoId", "")
     if not algo_id or data[0].get("sCode", "0") != "0":
         raise OKXError(f"set_algo_tp_sl failed: {data[0]}")
-    logger.info("Attached algo TP=%s SL=%s → algoId=%s", tp_price, sl_price, algo_id)
+    logger.info("Attached algo TP=%s SL=%s -> algoId=%s", tp_price, sl_price, algo_id)
     return algo_id
 
 
@@ -244,11 +298,11 @@ def cancel_order(inst_id: str, ord_id: str) -> None:
 
 
 def cancel_algo(inst_id: str, algo_id: str) -> None:
-    """Cancel a pending algo (TP/SL) order by algoId."""
-    data = _post("/trade/cancel-algos", {
-        "algoId": algo_id,
-        "instId": inst_id,
-    })
+    """Cancel a pending algo (TP/SL) order by algoId.
+
+    `/trade/cancel-algos` takes an array body, not a single object.
+    """
+    data = _post("/trade/cancel-algos", [{"algoId": algo_id, "instId": inst_id}])
     logger.info("Cancelled algo %s", algo_id)
     return data
 
@@ -279,11 +333,11 @@ def get_order(inst_id: str, ord_id: str) -> dict | None:
 
 
 def get_algo_pending(inst_id: str) -> list[dict]:
-    """Return pending algo (TP/SL) orders for inst_id."""
+    """Return pending algo (TP/SL) orders for inst_id. `ordType` is required by OKX."""
     return _get("/trade/orders-algo-pending", {
+        "ordType": "oco",
         "instType": "SWAP",
         "instId": inst_id,
-        "algoType": "oco",
     }) or []
 
 

@@ -33,28 +33,30 @@ def is_triggered(state: dict[str, Any]) -> bool:
     return True
 
 
-def check_and_trigger(state: dict[str, Any], balance: float) -> bool:
-    """Check daily loss vs threshold. Trigger circuit break if exceeded.
+def check_and_trigger(state: dict[str, Any], balance: float) -> str:
+    """Check daily loss vs threshold. Returns one of:
 
-    Returns True if circuit break was just triggered or is already active.
+    - "not_triggered": below threshold
+    - "already_active": circuit break already running from earlier
+    - "newly_triggered": just crossed threshold this call (caller should notify)
     """
     if is_triggered(state):
-        return True
+        return "already_active"
 
     max_loss_pct = float(os.getenv("MAX_DAILY_LOSS_PCT", "3.0"))
     daily_loss = state.get("daily_loss_usdt", 0.0)
 
     if balance <= 0:
         logger.warning("Balance is zero/negative — skipping circuit break check")
-        return False
+        return "not_triggered"
 
     loss_pct = daily_loss / balance * 100
 
     if loss_pct >= max_loss_pct:
         _trigger(state, daily_loss, loss_pct, max_loss_pct)
-        return True
+        return "newly_triggered"
 
-    return False
+    return "not_triggered"
 
 
 def record_loss(state: dict[str, Any], loss_usdt: float) -> None:

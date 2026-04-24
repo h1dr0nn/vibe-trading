@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "last_run": null,
+  "next_run": null,
+  "position": {
+    "active": false,
+    "side": null,
+    "entry_price": null,
+    "size_contracts": null,
+    "open_time": null,
+    "sl_price": null,
+    "tp1_price": null,
+    "tp2_price": null,
+    "algo_order_id": null,
+    "entry_order_id": null,
+    "reconciled": false,
+    "dry_run": false,
+    "original_sl_price": null,
+    "trail_stage": 0,
+    "trail_reason": null
+  },
+  "pending_order": {
+    "active": false,
+    "order_id": null,
+    "entry_price": null,
+    "placed_at": null,
+    "side": null
+  },
+  "circuit_break": false,
+  "circuit_break_until": null,
+  "daily_loss_usdt": 2.213999999999942,
+  "daily_realized_pnl": -2.213999999999942,
+  "daily_trades": 1,
+  "daily_reset_date": "2026-04-24",
+  "last_action": "closed_position",
+  "last_signal": {
+    "direction": 1,
+    "confidence": 90,
+    "net_score": 1.0,
+    "source": "agent+local_levels"
+  },
+  "bot_paused": false,
+  "pending_close_confirm": false,
+  "last_tp_close": {
+    "side": "long",
+    "close_price": 79354.8,
+    "time": "2026-04-22T18:55:20.003454+00:00"
+  }
+}
