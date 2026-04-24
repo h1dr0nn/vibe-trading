@@ -120,16 +120,26 @@ def build_llm(*, model_name: Optional[str] = None, callbacks: Any = None) -> Any
     name = model_name or os.getenv("LANGCHAIN_MODEL_NAME", "").strip()
     if not name:
         raise RuntimeError("LANGCHAIN_MODEL_NAME is not set")
-    temperature = float(os.getenv("LANGCHAIN_TEMPERATURE", "0.0"))
     timeout = int(os.getenv("TIMEOUT_SECONDS", "120"))
     max_retries = int(os.getenv("MAX_RETRIES", "2"))
-    return ChatOpenAI(
-        model=name,
-        temperature=temperature,
-        timeout=timeout,
-        max_retries=max_retries,
-        callbacks=callbacks,
-    )
+
+    # Temperature: only forward if explicitly set. Newer models (e.g. Claude
+    # Opus 4.7) reject the param entirely — passing even temperature=0.0
+    # returns HTTP 400 "temperature is deprecated". Leave unset to use the
+    # model default.
+    kwargs: dict[str, Any] = {
+        "model": name,
+        "timeout": timeout,
+        "max_retries": max_retries,
+        "callbacks": callbacks,
+    }
+    temp_raw = os.getenv("LANGCHAIN_TEMPERATURE")
+    if temp_raw is not None and temp_raw.strip() != "":
+        try:
+            kwargs["temperature"] = float(temp_raw)
+        except ValueError:
+            pass
+    return ChatOpenAI(**kwargs)
 
 
 def _extract_balanced_json(text: str) -> Optional[Dict[str, Any]]:
