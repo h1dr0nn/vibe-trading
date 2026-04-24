@@ -247,13 +247,15 @@ async def _start_application(token: str, on_cycle_trigger: Any) -> None:
             ("🛡 Risk", ["MAX_DAILY_LOSS_PCT", "MAX_OPEN_HOURS", "DANGER_SL_ATR_MULT", "DANGER_LOSS_PCT"]),
             ("⏱ Pending", ["PENDING_CANCEL_HOURS", "PENDING_CANCEL_DRIFT_PCT"]),
         ]
+        from bot.report import _esc
         lines = ["<b>⚙️ Config</b>"]
         for title, keys in groups:
             lines.append("")
             lines.append(f"<b>{title}</b>")
             for k in keys:
-                v = os.getenv(k, "<i>(not set)</i>")
-                lines.append(f"  <code>{k}</code>: <b>{v}</b>")
+                raw = os.getenv(k)
+                v = _esc(raw) if raw is not None else "<i>(not set)</i>"
+                lines.append(f"  <code>{_esc(k)}</code>: <b>{v}</b>")
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
     async def cmd_dryrun(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

@@ -6,8 +6,23 @@ tags are rendered. Keep messages compact — mobile screens are narrow.
 
 from __future__ import annotations
 
+import html
 from datetime import datetime, timezone
 from typing import Any
+
+
+def _esc(text: Any) -> str:
+    """HTML-escape untrusted strings before embedding in a Telegram message.
+
+    Telegram's HTML parser chokes on raw `<`, `>`, `&` — e.g. a reject
+    reason like "Confidence 70% < 75.0%" fails with "Unsupported start
+    tag". Any string coming from filter reasons, agent reasoning, source
+    labels, exceptions, or state['last_action'] MUST pass through this
+    before being nested into <b>/<i>/<code> tags.
+    """
+    if text is None:
+        return ""
+    return html.escape(str(text), quote=False)
 
 
 # ── Emoji constants ───────────────────────────────────────────────────────────
@@ -197,12 +212,12 @@ def order_placed(
         f"{E_TARGET} TP2: <code>{_fmt_price(tp2)}</code> ({_fmt_pct(tp2_pct)})",
         f"{E_STOP} SL : <code>{_fmt_price(sl)}</code> (-{sl_pct:.2f}%)",
         "",
-        f"{E_DICE} Confidence: <b>{conf}%</b> · Score <code>{score:+.2f}</code>",
+        f"{E_DICE} Confidence: <b>{_esc(conf)}%</b> · Score <code>{score:+.2f}</code>",
         f"{E_MONEY} Risk: <b>${risk_usdt:.2f}</b>",
-        f"{E_INFO} Source: <i>{source}</i>",
+        f"{E_INFO} Source: <i>{_esc(source)}</i>",
     ]
     if reasoning:
-        lines.append(f"💡 <b>Reasoning</b>: <i>{_truncate(reasoning, 380)}</i>")
+        lines.append(f"💡 <b>Reasoning</b>: <i>{_esc(_truncate(reasoning, 380))}</i>")
     tf_lines = _tf_breakdown_lines(signal)
     if tf_lines:
         lines.append("")
@@ -241,7 +256,7 @@ def position_closed(
     m = int((hold_hours - h) * 60)
 
     return "\n".join([
-        f"{prefix}{header_emoji} <b>Position closed</b> · <i>{reason_label}</i>",
+        f"{prefix}{header_emoji} <b>Position closed</b> · <i>{_esc(reason_label)}</i>",
         "",
         f"{_side_emoji(side)} {side.upper()}",
         f"   Entry: <code>{_fmt_price(entry_price)}</code>",
@@ -261,18 +276,18 @@ def no_trade(reason: str, signal: dict[str, Any], next_run_str: str) -> str:
     lines = [
         f"{E_PAUSE} <b>No trade</b>",
         "",
-        f"Reason: <i>{reason}</i>",
-        f"Signal: {_dir_emoji(direction)} <b>{_dir_label(direction)}</b> · conf <b>{conf}%</b> · score <code>{score:+.2f}</code>",
+        f"Reason: <i>{_esc(reason)}</i>",
+        f"Signal: {_dir_emoji(direction)} <b>{_dir_label(direction)}</b> · conf <b>{_esc(conf)}%</b> · score <code>{score:+.2f}</code>",
     ]
     reasoning = (signal.get("reasoning") or "").strip()
     if reasoning:
-        lines.append(f"💡 <i>{_truncate(reasoning, 320)}</i>")
+        lines.append(f"💡 <i>{_esc(_truncate(reasoning, 320))}</i>")
     tf_lines = _tf_breakdown_lines(signal)
     if tf_lines:
         lines.append("")
         lines.extend(tf_lines)
     lines.append("")
-    lines.append(f"{E_CLOCK} Next cycle: <i>{next_run_str}</i>")
+    lines.append(f"{E_CLOCK} Next cycle: <i>{_esc(next_run_str)}</i>")
     return "\n".join(lines)
 
 
@@ -299,7 +314,7 @@ def trail_moved(position: dict[str, Any], old_sl: float, new_sl: float, reason: 
     locked = size * CONTRACT_SIZE * (new_sl - entry) * direction
 
     return "\n".join([
-        f"{E_SHIELD} <b>SL moved</b> · <i>{reason}</i>",
+        f"{E_SHIELD} <b>SL moved</b> · <i>{_esc(reason)}</i>",
         "",
         f"{_side_emoji(side)} <b>{side.upper()}</b> · {size} contracts",
         f"   Entry : <code>{_fmt_price(entry)}</code>",
@@ -318,7 +333,7 @@ def danger_alert(reasons: list[str], position: dict[str, Any], close_price: floa
     sl = position.get("sl_price", 0) or 0
     pct = (close_price - entry) / entry * 100 if entry else 0
 
-    reason_text = "\n".join(f"  • <i>{r}</i>" for r in reasons)
+    reason_text = "\n".join(f"  • <i>{_esc(r)}</i>" for r in reasons)
     return "\n".join([
         f"{E_DANGER} <b>DANGER — closing position</b>",
         "",
@@ -375,7 +390,7 @@ def status_report(state: dict[str, Any], balance: float, current_price: float) -
 
     last_action = state.get("last_action")
     if last_action:
-        lines.append(f"{E_INFO} Last: <i>{last_action}</i>")
+        lines.append(f"{E_INFO} Last: <i>{_esc(last_action)}</i>")
 
     return "\n".join(lines)
 

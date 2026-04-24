@@ -29,15 +29,57 @@ load_dotenv(_ROOT / ".env", override=False)
 # Also try parent directory .env (monorepo layout)
 load_dotenv(_ROOT.parent / ".env", override=False)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%SZ",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("bot.log", encoding="utf-8"),
-    ],
-)
+def _setup_logging() -> None:
+    """Color-coded console via Rich + plain file log.
+
+    Third-party libs (httpx, telegram, apscheduler) flood INFO with polling
+    noise that buries real bot events (and leaks the bot token in URLs).
+    They're pinned at WARNING so only bot.* chatter shows at INFO.
+    """
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    # Clear any pre-existing handlers (idempotent re-import safe)
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+    # Console: WARNING+ only — the dashboard (console_ui) handles normal
+    # INFO events as Rich panels. INFO lines would just spam under panels.
+    try:
+        from rich.logging import RichHandler
+        console_handler: logging.Handler = RichHandler(
+            show_time=True,
+            show_path=False,
+            rich_tracebacks=True,
+            markup=False,
+            log_time_format="[%H:%M:%S]",
+        )
+        console_handler.setFormatter(logging.Formatter("%(name)s — %(message)s"))
+    except ImportError:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+    console_handler.setLevel(logging.WARNING)
+
+    # File: plain + full timestamps, easy to grep
+    file_handler = logging.FileHandler("bot.log", encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%SZ",
+    ))
+
+    root.addHandler(console_handler)
+    root.addHandler(file_handler)
+
+    # Silence noisy libraries (still captured at WARNING+)
+    for name in ("httpx", "httpcore", "telegram", "telegram.ext",
+                 "apscheduler", "apscheduler.executors.default",
+                 "apscheduler.scheduler", "urllib3"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+_setup_logging()
 logger = logging.getLogger("bot.main")
 
 
@@ -584,7 +626,7 @@ def _position_monitor_tick(use_agent: bool = True) -> None:
 
 
 def _bot_cycle_impl(use_agent: bool = True, position_only: bool = False) -> None:
-    from bot import circuit_breaker, order_manager, pending_order, position_guard, trail_manager
+    from bot import circuit_breaker, console_ui, order_manager, pending_order, position_guard, trail_manager
     from bot.okx_errors import SkipCycleError
     from bot.state import load_state, reset_daily_if_needed, save_state
     from bot.telegram_bot import send_message_sync
@@ -697,6 +739,14 @@ def _bot_cycle_impl(use_agent: bool = True, position_only: bool = False) -> None
                     pos_snap, close_price, realized, hold_hours, reason, balance_now,
                 )
 
+                try:
+                    from bot import console_ui as _cui
+                    _cui.position_closed_panel(
+                        pos_snap.get("side", "?"), entry_price, close_price,
+                        realized, hold_hours, balance_now, reason,
+                    )
+                except Exception:
+                    pass
                 send_message_sync(rpt.position_closed(
                     pos_snap.get("side", "?"), entry_price, close_price,
                     size, hold_hours, balance_now, reason, dry_run,
@@ -736,7 +786,7 @@ def _bot_cycle_impl(use_agent: bool = True, position_only: bool = False) -> None
             send_message_sync(msg)
         except Exception as exc:
             logger.error("Manual close failed: %s", exc)
-            send_message_sync(f"❌ <b>Manual close FAILED</b>\n<i>{exc}</i>")
+            send_message_sync(f"❌ <b>Manual close FAILED</b>\n<i>{rpt._esc(exc)}</i>")
         state["pending_close_confirm"] = False
         save_state(state)
         return
@@ -761,6 +811,16 @@ def _bot_cycle_impl(use_agent: bool = True, position_only: bool = False) -> None
     if not current_price:
         logger.error("Cannot determine current price — skipping cycle")
         return
+
+    # Dashboard cycle header (skip on 5-min silent ticks to keep console clean)
+    if not position_only:
+        if state["position"]["active"]:
+            state_label = "HOLDING"
+        elif state["pending_order"]["active"]:
+            state_label = "PENDING FILL"
+        else:
+            state_label = "IDLE · analyzing"
+        console_ui.cycle_header(state_label, current_price, balance)
 
     # ── Sync position size (live vs state) ────────────────────────────────────
     if state["position"]["active"]:
@@ -802,6 +862,7 @@ def _bot_cycle_impl(use_agent: bool = True, position_only: bool = False) -> None
             is_dangerous, reasons = False, []
 
         if is_dangerous:
+            console_ui.danger_panel(reasons, state["position"], current_price)
             send_message_sync(rpt.danger_alert(reasons, state["position"], current_price))
             pos_snap = dict(state["position"])
             open_time_str = pos_snap.get("open_time")
@@ -823,6 +884,10 @@ def _bot_cycle_impl(use_agent: bool = True, position_only: bool = False) -> None
                     pos_snap, current_price, _realized, hold_hours, close_reason, balance,
                     extra={"danger_reasons": reasons},
                 )
+                console_ui.position_closed_panel(
+                    pos_snap.get("side", "?"), pos_snap.get("entry_price", 0),
+                    current_price, _realized, hold_hours, balance, close_reason,
+                )
                 send_message_sync(rpt.position_closed(
                     pos_snap.get("side", "?"), pos_snap.get("entry_price", 0),
                     current_price, pos_snap.get("size_contracts", 0),
@@ -830,7 +895,7 @@ def _bot_cycle_impl(use_agent: bool = True, position_only: bool = False) -> None
                 ))
             except Exception as exc:
                 logger.error("close_trade failed: %s", exc)
-                send_message_sync(f"❌ <b>FAILED to close dangerous position</b>\n<i>{exc}</i>")
+                send_message_sync(f"❌ <b>FAILED to close dangerous position</b>\n<i>{rpt._esc(exc)}</i>")
         else:
             # Safe — optionally ask agent (full cycles only, API cost control).
             if not position_only and os.getenv("AGENT_HOLD_CHECK", "false").lower() == "true":
@@ -847,6 +912,22 @@ def _bot_cycle_impl(use_agent: bool = True, position_only: bool = False) -> None
                     funding_rate = float(fund_data.get("fundingRate", 0))
                 except Exception:
                     funding_rate = None
+
+                # Console dashboard — compact holding panel
+                pos = state["position"]
+                entry = float(pos.get("entry_price") or 0)
+                size = float(pos.get("size_contracts") or 0)
+                direction = 1 if pos.get("side") == "long" else -1
+                pnl_usdt = size * order_manager.CONTRACT_SIZE * (current_price - entry) * direction
+                pnl_pct = pnl_usdt / balance * 100 if balance else 0
+                hold_h = 0.0
+                if pos.get("open_time"):
+                    from bot.pending_order import _parse_dt as _pdt
+                    ot = _pdt(pos["open_time"])
+                    if ot:
+                        hold_h = (datetime.now(tz=timezone.utc) - ot).total_seconds() / 3600
+                console_ui.cycle_report_panel(pos, balance, current_price, pnl_usdt, pnl_pct, hold_h)
+
                 send_message_sync(rpt.cycle_report(state, balance, current_price, funding_rate))
 
         save_state(state)
@@ -881,7 +962,7 @@ def _bot_cycle_impl(use_agent: bool = True, position_only: bool = False) -> None
         elif not state["pending_order"]["active"]:
             if not position_only:
                 send_message_sync(
-                    f"⚠️ <b>Pending order cleared</b>\n<i>{state.get('last_action', 'unknown')}</i>\n\n"
+                    f"⚠️ <b>Pending order cleared</b>\n<i>{rpt._esc(state.get('last_action', 'unknown'))}</i>\n\n"
                     f"💰 Balance: <b>${balance:,.2f}</b>  📊 Current: <code>${current_price:,.0f}</code>"
                 )
         else:
@@ -912,11 +993,29 @@ def _bot_cycle_impl(use_agent: bool = True, position_only: bool = False) -> None
         save_state(state)
         return
 
+    # Console dashboard — TF breakdown table
+    tfb = signal.get("tf_breakdown") or {}
+    if tfb:
+        console_ui.signal_table(
+            tf_breakdown=tfb,
+            confluence={
+                "agreeing_tfs": signal.get("agreeing_tfs", 0),
+                "net_score": signal.get("net_score", 0),
+                "confidence": (
+                    "HIGH" if signal.get("confidence", 0) >= 75
+                    else "MEDIUM" if signal.get("confidence", 0) >= 55
+                    else "LOW"
+                ),
+            },
+            confidence_pct=int(signal.get("confidence", 0) or 0),
+        )
+
     passes, reject_reason = _signal_passes_filters(signal, state)
 
     if not passes:
         logger.info("No trade — %s", reject_reason)
         next_run = _next_run_str()
+        console_ui.no_trade_panel(reject_reason, signal, next_run)
         send_message_sync(rpt.no_trade(reject_reason, signal, next_run))
         state["last_action"] = "no_trade"
         state["last_signal"] = {
@@ -992,11 +1091,12 @@ def _bot_cycle_impl(use_agent: bool = True, position_only: bool = False) -> None
 
         # Notify
         risk_usdt = worst_case_loss
-        send_message_sync(rpt.order_placed(signal, contracts, risk_usdt,
-                                           state["pending_order"].get("order_id", "?"), dry_run))
+        order_id = state["pending_order"].get("order_id", "?")
+        console_ui.order_placed_panel(signal, contracts, risk_usdt, order_id, dry_run)
+        send_message_sync(rpt.order_placed(signal, contracts, risk_usdt, order_id, dry_run))
     except Exception as exc:
         logger.error("open_trade failed: %s", exc)
-        send_message_sync(f"Order placement FAILED: {exc}")
+        send_message_sync(f"Order placement FAILED: {rpt._esc(exc)}")
 
     save_state(state)
     logger.info("=== Cycle end ===")
@@ -1137,13 +1237,13 @@ def _agent_hold_review(
 
     if d == "HOLD":
         send_message_sync(
-            f"🤖 <b>Agent: HOLD</b>\n💡 <i>{reasoning[:320]}</i>"
+            f"🤖 <b>Agent: HOLD</b>\n💡 <i>{rpt._esc(reasoning[:320])}</i>"
         )
         return state
 
     if d == "CLOSE":
         send_message_sync(
-            f"🤖 <b>Agent: CLOSE</b>\n💡 <i>{reasoning[:320]}</i>\n\n"
+            f"🤖 <b>Agent: CLOSE</b>\n💡 <i>{rpt._esc(reasoning[:320])}</i>\n\n"
             f"🛑 Executing market close…"
         )
         try:
@@ -1164,7 +1264,7 @@ def _agent_hold_review(
             ))
         except Exception as exc:
             logger.error("Agent close failed: %s", exc)
-            send_message_sync(f"❌ Agent close FAILED: {exc}")
+            send_message_sync(f"❌ Agent close FAILED: {rpt._esc(exc)}")
         return state
 
     if d == "TIGHTEN_SL":
@@ -1190,7 +1290,7 @@ def _agent_hold_review(
             send_message_sync(
                 f"🤖 <b>Agent: TIGHTEN SL</b>\n"
                 f"   SL <code>${old_sl:,.0f}</code> → <code>${new_sl:,.0f}</code>\n"
-                f"💡 <i>{reasoning[:280]}</i>"
+                f"💡 <i>{rpt._esc(reasoning[:280])}</i>"
             )
     return state
 
@@ -1276,6 +1376,14 @@ def _handle_fresh_fill_then_close(state: dict, balance: float) -> None:
 
     # Post-trade review log
     _append_trade_review(pos, close_price, realized, hold_hours, reason, balance)
+
+    try:
+        from bot import console_ui as _cui
+        _cui.position_closed_panel(
+            side, entry_price, close_price, realized, hold_hours, balance, reason,
+        )
+    except Exception:
+        pass
 
     send_message_sync(
         f"⚡ <b>Filled then closed</b> · <i>{rpt._reason_label(reason)}</i>\n\n"
@@ -1363,6 +1471,15 @@ def main() -> None:
     risk = os.getenv("RISK_PCT", "1.0")
     mode_emoji = "⚠️" if dry else ("🧪" if demo else "🚀")
     mode_label = "DRY RUN" if dry else ("DEMO" if demo else "LIVE")
+
+    # Console dashboard banner
+    from bot import console_ui
+    console_ui.startup_banner({
+        "mode": mode_label, "symbol": symbol, "interval": interval,
+        "leverage": leverage, "risk_pct": risk, "agent": use_agent,
+        "regime_filter": os.getenv("REGIME_FILTER", "true").lower() == "true",
+    })
+
     send_message_sync(
         f"{mode_emoji} <b>Bot started</b> · <i>{mode_label}</i>\n\n"
         f"📊 Symbol: <code>{symbol}</code>\n"
